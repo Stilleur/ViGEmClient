@@ -27,8 +27,9 @@ SOFTWARE.
 // WinAPI
 // 
 #include <Windows.h>
-#include <SetupAPI.h>
+#include <cfgmgr32.h>
 #include <initguid.h>
+#include <devpkey.h>
 #include <Dbghelp.h>
 
 //
@@ -165,62 +166,89 @@ void vigem_free(PVIGEM_CLIENT vigem)
 VIGEM_ERROR vigem_connect(PVIGEM_CLIENT vigem)
 {
     if (!vigem)
+    {
         return VIGEM_ERROR_BUS_INVALID_HANDLE;
+    }
 
-    SP_DEVICE_INTERFACE_DATA deviceInterfaceData = { 0 };
-    deviceInterfaceData.cbSize = sizeof(deviceInterfaceData);
-    DWORD memberIndex = 0;
-    DWORD requiredSize = 0;
-    auto error = VIGEM_ERROR_BUS_NOT_FOUND;
-
-    // check for already open handle as re-opening accidentally would destroy all live targets
+    // check for open bus handle as re-opening would destroy all live targets
     if (vigem->hBusDevice != INVALID_HANDLE_VALUE)
     {
         return VIGEM_ERROR_BUS_ALREADY_CONNECTED;
     }
 
-    const auto deviceInfoSet = SetupDiGetClassDevs(
-        &GUID_DEVINTERFACE_BUSENUM_VIGEM,
-        nullptr,
-        nullptr,
-        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
-    );
+    CONFIGRET cr = CR_SUCCESS;
+    PWSTR DeviceInterfaceList = NULL;
+    ULONG DeviceInterfaceListLength = 0;
+    PWSTR CurrentInterface;
+    WCHAR CurrentDevice[MAX_DEVICE_ID_LEN];
+    DEVPROPTYPE PropertyType;
+    ULONG PropertySize;
+    DWORD Index = 0;
 
-    // enumerate device instances
-    while (SetupDiEnumDeviceInterfaces(
-        deviceInfoSet,
-        nullptr,
-        &GUID_DEVINTERFACE_BUSENUM_VIGEM,
-        memberIndex++,
-        &deviceInterfaceData
-    ))
-    {
-        // get required target buffer size
-        SetupDiGetDeviceInterfaceDetail(deviceInfoSet, &deviceInterfaceData, nullptr, 0, &requiredSize, nullptr);
+    do {
+        cr = CM_Get_Device_Interface_List_Size(&DeviceInterfaceListLength,
+            (LPGUID)&GUID_DEVINTERFACE_BUSENUM_VIGEM,
+            NULL,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
 
-        // allocate target buffer
-        const auto detailDataBuffer = static_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA>(malloc(requiredSize));
-        detailDataBuffer->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
-
-        // get detail buffer
-        if (!SetupDiGetDeviceInterfaceDetail(
-            deviceInfoSet,
-            &deviceInterfaceData,
-            detailDataBuffer,
-            requiredSize,
-            &requiredSize,
-            nullptr
-        ))
+        if (cr != CR_SUCCESS)
         {
-            SetupDiDestroyDeviceInfoList(deviceInfoSet);
-            free(detailDataBuffer);
+            break;
+        }
+
+        if (DeviceInterfaceList != NULL) {
+            HeapFree(GetProcessHeap(),
+                0,
+                DeviceInterfaceList);
+        }
+
+        DeviceInterfaceList = (PWSTR)HeapAlloc(GetProcessHeap(),
+            HEAP_ZERO_MEMORY,
+            DeviceInterfaceListLength * sizeof(WCHAR));
+
+        if (DeviceInterfaceList == NULL)
+        {
+            cr = CR_OUT_OF_MEMORY;
+            break;
+        }
+
+        cr = CM_Get_Device_Interface_List((LPGUID)&GUID_DEVINTERFACE_BUSENUM_VIGEM,
+            NULL,
+            DeviceInterfaceList,
+            DeviceInterfaceListLength,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+    } while (cr == CR_BUFFER_SMALL);
+
+    // could not list the devices interfaces
+    if (cr != CR_SUCCESS)
+    {
+        return VIGEM_ERROR_BUS_NOT_FOUND;
+    }
+
+    auto error = VIGEM_ERROR_BUS_NOT_FOUND;
+
+    for (CurrentInterface = DeviceInterfaceList;
+        *CurrentInterface;
+        CurrentInterface += wcslen(CurrentInterface) + 1)
+    {
+
+        PropertySize = sizeof(CurrentDevice);
+        cr = CM_Get_Device_Interface_Property(CurrentInterface,
+            &DEVPKEY_Device_InstanceId,
+            &PropertyType,
+            (PBYTE)CurrentDevice,
+            &PropertySize,
+            0);
+
+        if (cr != CR_SUCCESS || PropertyType != DEVPROP_TYPE_STRING)
+        {
             error = VIGEM_ERROR_BUS_NOT_FOUND;
             continue;
         }
 
         // bus found, open it
         vigem->hBusDevice = CreateFile(
-            detailDataBuffer->DevicePath,
+            CurrentInterface,
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr,
@@ -233,7 +261,6 @@ VIGEM_ERROR vigem_connect(PVIGEM_CLIENT vigem)
         if (vigem->hBusDevice == INVALID_HANDLE_VALUE)
         {
             error = VIGEM_ERROR_BUS_ACCESS_FAILED;
-            free(detailDataBuffer);
             continue;
         }
 
@@ -260,7 +287,6 @@ VIGEM_ERROR vigem_connect(PVIGEM_CLIENT vigem)
         if (GetOverlappedResult(vigem->hBusDevice, &lOverlapped, &transferred, TRUE) != 0)
         {
             error = VIGEM_ERROR_NONE;
-            free(detailDataBuffer);
             CloseHandle(lOverlapped.hEvent);
             break;
         }
@@ -268,10 +294,16 @@ VIGEM_ERROR vigem_connect(PVIGEM_CLIENT vigem)
         error = VIGEM_ERROR_BUS_VERSION_MISMATCH;
 
         CloseHandle(lOverlapped.hEvent);
-        free(detailDataBuffer);
+
+        Index++;
     }
 
-    SetupDiDestroyDeviceInfoList(deviceInfoSet);
+    if (DeviceInterfaceList != NULL)
+    {
+        HeapFree(GetProcessHeap(),
+            0,
+            DeviceInterfaceList);
+    }
 
     return error;
 }
