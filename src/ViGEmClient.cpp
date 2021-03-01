@@ -180,9 +180,6 @@ VIGEM_ERROR vigem_connect(PVIGEM_CLIENT vigem)
     PWSTR DeviceInterfaceList = NULL;
     ULONG DeviceInterfaceListLength = 0;
     PWSTR CurrentInterface;
-    WCHAR CurrentDevice[MAX_DEVICE_ID_LEN];
-    DEVPROPTYPE PropertyType;
-    ULONG PropertySize;
     DWORD Index = 0;
 
     do {
@@ -227,34 +224,22 @@ VIGEM_ERROR vigem_connect(PVIGEM_CLIENT vigem)
 
     auto error = VIGEM_ERROR_BUS_NOT_FOUND;
 
+    CREATEFILE2_EXTENDED_PARAMETERS ExParams = { 0 };
+    ExParams.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+    ExParams.dwFileFlags = FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED | FILE_FLAG_WRITE_THROUGH;
+    ExParams.dwSecurityQosFlags = SECURITY_IMPERSONATION;
+    ExParams.dwSize = sizeof(ExParams);
+
     for (CurrentInterface = DeviceInterfaceList;
         *CurrentInterface;
         CurrentInterface += wcslen(CurrentInterface) + 1)
     {
-
-        PropertySize = sizeof(CurrentDevice);
-        cr = CM_Get_Device_Interface_Property(CurrentInterface,
-            &DEVPKEY_Device_InstanceId,
-            &PropertyType,
-            (PBYTE)CurrentDevice,
-            &PropertySize,
-            0);
-
-        if (cr != CR_SUCCESS || PropertyType != DEVPROP_TYPE_STRING)
-        {
-            error = VIGEM_ERROR_BUS_NOT_FOUND;
-            continue;
-        }
-
-        // bus found, open it
-        vigem->hBusDevice = CreateFile(
+        vigem->hBusDevice = CreateFile2(
             CurrentInterface,
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OVERLAPPED,
-            nullptr
+            &ExParams
         );
 
         // check bus open result
